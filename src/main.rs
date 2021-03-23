@@ -1,7 +1,5 @@
-use std::collections::HashMap;
 use std::io::Read;
 use std::io::Write;
-use std::net::Ipv4Addr;
 
 extern crate byteorder;
 extern crate etherparse;
@@ -19,27 +17,14 @@ fn main() {
 
     let mut nic = tun::create(&config).unwrap();
     let mut buf = [0u8; 1504];
-    let mut packet_info = [0u8; 4];
     let mut responded = false;
 
     loop {
         let nbytes = nic.read(&mut buf).unwrap();
-        packet_info = [buf[0], buf[1], buf[2], buf[3]];
+        let packet_info:[u8; 4] = [buf[0], buf[1], buf[2], buf[3]];
         match etherparse::Ipv4HeaderSlice::from_slice(&buf[TUN_PCK_INFO_LEN..nbytes]) {
             Ok(ip_header) => {
-                let source_addr = ip_header.source_addr();
-                let destination_addr = ip_header.destination_addr();
-                let protocol = ip_header.protocol();
-                eprintln!(
-                    "{} → {} size={}b proto={:x} ttl={}",
-                    source_addr,
-                    destination_addr,
-                    ip_header.payload_len(),
-                    protocol,
-                    ip_header.ttl(),
-                );
-
-                if protocol != 0x06 {
+                if ip_header.protocol() != 0x06 { // 0x06 is TCP
                     // not TCP
                     continue;
                 }
@@ -47,16 +32,14 @@ fn main() {
                     &buf[TUN_PCK_INFO_LEN + ip_header.slice().len()..],
                 ) {
                     Ok(tcp_header) => {
-                        let data_index =
-                            TUN_PCK_INFO_LEN + ip_header.slice().len() + tcp_header.slice().len();
-                        let data = &buf[data_index..nbytes];
                         eprintln!(
-                            "{}:{} → {}:{} size={}b proto=tcp",
+                            "{}:{} → {}:{} ip_size={}b tcp_size=0b proto=tcp ttl={}",
                             ip_header.source_addr(),
                             tcp_header.source_port(),
                             ip_header.destination_addr(),
                             tcp_header.destination_port(),
-                            data.len(),
+                            ip_header.payload_len(),
+                            ip_header.ttl()
                         );
                         if responded {
                             // already responded,
@@ -64,17 +47,17 @@ fn main() {
                         }
 
                         let mut buf = [0u8; 1500];
-                        let mut syn_ack = etherparse::TcpHeader::new(
+                        let mut syn_ack_payload = etherparse::TcpHeader::new(
                             tcp_header.destination_port(),
                             tcp_header.source_port(),
                             0,
                             tcp_header.window_size(),
                         );
-                        syn_ack.syn = true;
-                        syn_ack.ack = true;
-                        syn_ack.acknowledgment_number = tcp_header.sequence_number() + 1;
-                        let mut reply_ip_payoad = etherparse::Ipv4Header::new(
-                            syn_ack.header_len(),
+                        syn_ack_payload.syn = true;
+                        syn_ack_payload.ack = true;
+                        syn_ack_payload.acknowledgment_number = tcp_header.sequence_number() + 1;
+                        let ip_payload = etherparse::Ipv4Header::new(
+                            syn_ack_payload.header_len(),
                             64,
                             etherparse::IpTrafficClass::Tcp,
                             [
@@ -90,14 +73,14 @@ fn main() {
                                 ip_header.source()[3],
                             ],
                         );
-                        syn_ack.checksum = syn_ack
-                            .calc_checksum_ipv4(&reply_ip_payoad, &[])
+                        syn_ack_payload.checksum = syn_ack_payload
+                            .calc_checksum_ipv4(&ip_payload, &[])
                             .unwrap();
                         let unwritten: usize = {
                             let mut unwritten = &mut buf[..];
-                            unwritten.write_all(&packet_info);
-                            reply_ip_payoad.write(&mut unwritten).unwrap();
-                            syn_ack.write(&mut unwritten).unwrap();
+                            unwritten.write_all(&packet_info).unwrap();
+                            ip_payload.write(&mut unwritten).unwrap();
+                            syn_ack_payload.write(&mut unwritten).unwrap();
                             unwritten.len()
                         };
                         eprintln!(
